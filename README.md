@@ -37,13 +37,39 @@ docker/entrypoint.sh      # Container entrypoint: migrate, then start uvicorn
 tests/                    # pytest suite
 ```
 
-Each feature package in `modules/` contains `models.py`, `schemas.py`, `service.py`, and `router.py`.
+Every feature in `core/` and `modules/` is split into strict layers:
+
+```text
+<feature>/
+  models.py            # SQLAlchemy models
+  controllers/         # FastAPI routers only
+  services/            # Business logic, one file per use-case area
+  repositories/        # All database access, one file per aggregate
+  dto/request/         # Request models
+  dto/response/        # Response models
+```
+
+A folder is omitted when a feature has no use for it: `audit` has no controllers or DTOs, and `health` has no models. For example, `core/auth` looks like this:
+
+```text
+core/auth/
+  models.py  types.py  constants.py  deps.py
+  controllers/    session, password, verify, identifier, two_factor, sudo, helpers
+  services/       tokens, otp, login, oauth, verify, password, identifiers, two_factor, sudo, sessions
+  repositories/   user, identifier, credential, session, two_factor
+  helpers/        normalize.py
+  dto/request/    common, session, password, verify, sudo, two_factor
+  dto/response/   session, password, verify, identifier, sudo, two_factor
+```
+
+Dependencies point one way: controllers call services, services call repositories.
 
 ### Key design choices
 
 - **Plain async functions**: Services and routes are functions, not classes. Dependencies are passed explicitly.
-- **Thin routes**: A route validates input, calls a service, and returns an `Envelope`.
-- **Explicit commits**: Services commit their own writes, so a write is kept even when the HTTP response is an error.
+- **Thin controllers**: A controller parses the request, calls one service, and builds the `Envelope`. It never queries the database.
+- **Queries only in repositories**: Repositories are plain functions that take `db` and return models. They never commit, raise HTTP errors, or touch the cache or queues.
+- **Explicit commits**: Services commit their own writes (`await db.commit()`), so a write is kept even when the HTTP response is an error.
 - **Uniform responses**: Every success response uses the `Envelope` schema. Errors use one JSON shape.
 - **Messages in one place**: User-facing text comes from `app.locals`, so a language can be added by loading another folder of JSON.
 
@@ -180,11 +206,13 @@ CI runs the same commands on every push and pull request, with service container
 
 ## Adding a Feature
 
-1. Create `src/app/modules/<feature>/` with `models.py`, `schemas.py`, `service.py`, and `router.py`.
-2. Put business logic in `service.py`. Keep `router.py` thin.
-3. Import the router in `src/app/main.py` and include it under the `/api/v1` prefix.
-4. Add an Alembic revision for any new table: `uv run alembic revision --autogenerate -m "<message>"`.
-5. Add tests under `tests/`.
+1. Create `src/app/modules/<feature>/` with `models.py`, `controllers/`, `services/`, `repositories/`, `dto/request/` and `dto/response/`, each with an `__init__.py`.
+2. Put queries in `repositories/<aggregate>.py` as plain async functions taking `db`. They return models and never commit.
+3. Put business logic in `services/<area>.py`. Services call repositories and commit explicitly with `await db.commit()`.
+4. Put the router in `controllers/<area>.py`. It parses the request, calls one service, and returns an `Envelope`.
+5. Add the models to `src/app/database/models.py`, then include the router in `src/app/main.py` under the `/api/v1` prefix.
+6. Add an Alembic revision for any new table: `uv run alembic revision --autogenerate -m "<message>"`.
+7. Add tests under `tests/`.
 
 ## Contributing
 

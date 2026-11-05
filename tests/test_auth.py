@@ -6,8 +6,8 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import select, update
 
-from app.core.auth import identifiers, oauth
 from app.core.auth.models import AuthProvider, User, UserIdentifier
+from app.core.auth.services import identifiers, oauth
 from app.database.session import SessionLocal, utcnow
 from app.infrastructure.cache import cache, key
 from tests.conftest import PASSWORD, auth, elevate, register, verified_user

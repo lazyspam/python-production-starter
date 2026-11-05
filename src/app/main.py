@@ -9,10 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.common.errors import register_error_handlers
 from app.common.rate_limit import limit
 from app.configs.settings import get_settings
-from app.core.auth.routers import identifier, password, session, sudo, two_factor, verify
-from app.core.fcm_token.router import router as fcm_router
-from app.core.files.router import router as files_router
-from app.core.health.router import router as health_router
+from app.core.auth.controllers import identifier, password, session, sudo, two_factor, verify
+from app.core.fcm_token.controllers.fcm_token import router as fcm_router
+from app.core.files.controllers.files import router as files_router
+from app.core.health.controllers.health import router as health_router
 from app.database import models  # noqa: F401
 from app.database.session import engine
 from app.infrastructure.cache import cache, setup_cache

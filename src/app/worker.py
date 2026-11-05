@@ -6,8 +6,8 @@ import signal
 import structlog
 from bullmq import Job, Worker
 
-from app.core.audit.service import write as write_audit
-from app.core.auth.identifiers import reclaim_identifiers
+from app.core.audit.services.audit import write as write_audit
+from app.core.auth.services.identifiers import reclaim_identifiers
 from app.database import models  # noqa: F401
 from app.database.session import SessionLocal, engine
 from app.infrastructure.messaging import deliver_mail, deliver_sms

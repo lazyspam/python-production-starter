@@ -5,11 +5,12 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer
 
-from app.core.auth import repository as repo
-from app.core.auth import sudo
 from app.core.auth.constants import ACCESS_TOKEN_COOKIE
 from app.core.auth.models import UserStatus
-from app.core.auth.tokens import decode_access_token, unauthorized
+from app.core.auth.repositories import identifier as identifier_repo
+from app.core.auth.repositories import user as user_repo
+from app.core.auth.services import sudo
+from app.core.auth.services.tokens import decode_access_token, unauthorized
 from app.database.session import Db
 from app.locals import msg
 
@@ -28,10 +29,10 @@ async def _current_user(request: Request, db: Db, credentials=Depends(_bearer)) 
     payload = decode_access_token(token) if token else None
     if not payload:
         raise unauthorized("Unauthorized")
-    user = await repo.find_user(db, payload["sub"])
+    user = await user_repo.find_user(db, payload["sub"])
     if not user or user.status != UserStatus.ACTIVE:
         raise unauthorized(msg.auth.account_no_longer_available)
-    return CurrentUser(user.id, payload.get("sid"), await repo.is_account_verified(db, user.id))
+    return CurrentUser(user.id, payload.get("sid"), await identifier_repo.is_account_verified(db, user.id))
 
 
 async def _verified_user(user: Annotated[CurrentUser, Depends(_current_user)]) -> CurrentUser:

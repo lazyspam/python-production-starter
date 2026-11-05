@@ -7,7 +7,7 @@ from bullmq import Worker
 from sqlalchemy import select
 
 from app.core.audit.models import Activity
-from app.core.audit.service import write
+from app.core.audit.services.audit import write
 from app.core.fcm_token.models import FcmToken
 from app.database.session import SessionLocal
 from app.infrastructure.cache import cache

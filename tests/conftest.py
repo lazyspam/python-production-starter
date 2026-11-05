@@ -68,7 +68,7 @@ def outbox(monkeypatch) -> Outbox:
         audit.append(data)
 
     monkeypatch.setattr("app.infrastructure.messaging.enqueue", fake_enqueue)
-    monkeypatch.setattr("app.core.audit.service.enqueue", fake_audit_enqueue)
+    monkeypatch.setattr("app.core.audit.services.audit.enqueue", fake_audit_enqueue)
     box.audit = audit
     return box
 

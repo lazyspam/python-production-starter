@@ -21,7 +21,7 @@ async def emit_to_user(user_id: str, event: str, data: dict) -> None:
 
 @sio.event
 async def connect(sid: str, environ: dict, auth: dict | None) -> None:
-    from app.core.auth.tokens import decode_access_token
+    from app.core.auth.services.tokens import decode_access_token
 
     payload = decode_access_token((auth or {}).get("token", ""))
     if payload is None:
