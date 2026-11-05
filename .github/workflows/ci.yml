@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Test-only values. These are not secrets and must never be used outside CI.
+  ENVIRONMENT: test
+  DATABASE_URL: postgresql://postgres:password@localhost:5432/postgres
+  REDIS_URL: redis://localhost:6379
+  REDIS_KEY_PREFIX: "ci-test:"
+  JWT_ACCESS_SECRET: ci-test-access-secret-not-for-production-use
+  JWT_REFRESH_SECRET: ci-test-refresh-secret-not-for-production-use
+  AUTH_ENCRYPTION_KEY: RJmgHZO9YQGCrSxVs-VOSAKkiCEpEXUhaUBuNhjtk7E=
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Migrate database
+        run: uv run alembic upgrade head
+
+      - name: Test
+        run: uv run pytest

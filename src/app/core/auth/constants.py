@@ -1,0 +1,5 @@
+ACCESS_TOKEN_COOKIE = "access_token"
+REFRESH_TOKEN_COOKIE = "refresh_token"
+REFRESH_TOKEN_COOKIE_PATH = "/api/v1/auth"
+AUTH_TRANSPORT_HEADER = "x-auth-transport"
+AUTH_TRANSPORT_BEARER = "bearer"

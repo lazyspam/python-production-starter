@@ -1,0 +1,123 @@
+# Full local app stack: api + worker + Postgres + Redis.
+#
+#   docker compose up --build -d   # build the image, start everything
+#   docker compose logs -f app     # tail API logs
+#   docker compose logs -f worker  # tail worker logs
+#   docker compose down            # stop, keep data
+#   docker compose down -v         # stop and wipe all volumes
+#
+# Endpoints once everything is healthy:
+#   API ............... http://localhost:3000/api/v1
+#   API (Swagger) .... not served here: ENVIRONMENT=production below.
+#                      Run the API outside compose with ENVIRONMENT=development for /api/docs.
+#   Postgres .......... localhost:5432  (postgres / password)
+#   Redis ............. localhost:6379
+
+name: python-production-starter
+
+x-app-image: &app-image python-production-starter:local
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: python-production-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    # If you want to expose the Postgres port outside the Docker network, uncomment the following line.
+    # ports:
+    #   - "5432:5432" # remove in production deployments
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [app-net]
+
+  redis:
+    image: redis:8-alpine
+    container_name: python-production-redis
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redis-data:/data
+    # If you want to expose the Redis port outside the Docker network, uncomment the following line.
+    # ports:
+    #   - "6379:6379" # remove in production deployments
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    networks: [app-net]
+
+  # API. Runs `alembic upgrade head` before uvicorn (docker/entrypoint.sh).
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: *app-image
+    container_name: python-production-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ENVIRONMENT: production
+      PORT: '3000'
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    ports:
+      - '3000:3000'
+    networks: [app-net]
+
+  # Background jobs (BullMQ consumers). Same image, different entrypoint, no HTTP port.
+  # Starts only after the API is healthy, which means migrations have already run.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: *app-image
+    container_name: python-production-worker
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "app.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    networks: [app-net]
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  app-net:
+    driver: bridge

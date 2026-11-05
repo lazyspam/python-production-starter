@@ -1,0 +1,42 @@
+# Build artifacts and local installs. The image builds its own .venv.
+.venv
+__pycache__
+*.py[oc]
+*.egg-info
+build
+dist
+coverage
+.pytest_cache
+.ruff_cache
+.ty_cache
+
+# Secrets. Never bake these into a layer.
+.env
+.env.*
+!.env.example
+
+# VCS and CI metadata.
+.git
+.gitignore
+.gitattributes
+.github
+
+# Editor and tool config.
+.vscode
+.idea
+.DS_Store
+
+# Tests and docs are not needed to run the app.
+tests
+README.md
+AGENTS.md
+CLAUDE.md
+docs
+
+# Compose files and Docker scaffolding (the Dockerfile copies what it needs).
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# Logs and debug output.
+*.log
