@@ -97,7 +97,7 @@ async def test_login_failures_are_uniform_and_lock_out(client):
 
     from app.common.security import sha256
 
-    await cache.set(key(f"login:fail:{sha256('a@example.com')}"), 10, expire=60)
+    await cache.set(key(f"login:fail:{sha256('a@example.com')}:127.0.0.1"), 10, expire=60)
     r = await client.post("/auth/login", json={"email": "a@example.com", "password": PASSWORD})
     assert r.status_code == 429 and "attempts" in r.json()["message"]
 
@@ -108,7 +108,7 @@ async def test_failed_logins_count_up(client):
     await register(client)
     for _ in range(3):
         await client.post("/auth/login", json={"email": "a@example.com", "password": "wrong-password"})
-    assert int(await cache.get(key(f"login:fail:{sha256('a@example.com')}"))) == 3
+    assert int(await cache.get(key(f"login:fail:{sha256('a@example.com')}:127.0.0.1")) or 0) == 3
 
 
 async def test_two_logins_in_the_same_second_get_separate_sessions(client):
@@ -199,9 +199,11 @@ async def test_totp_login_challenge(client, outbox):
     assert "tokens" not in body and body["methods"] == ["TOTP"]
     verify = {"challengeId": body["challengeId"], "type": "TOTP"}
     assert (await client.post("/auth/2fa/challenge/verify", json={**verify, "code": "000000"})).status_code == 401
-    r = await client.post("/auth/2fa/challenge/verify", json={**verify, "code": pyotp.TOTP(secret).now()})
+    # Enrollment spent the current step's code; the next step's code is still inside the window.
+    code = pyotp.TOTP(secret).at(int(time.time()) + 30)
+    r = await client.post("/auth/2fa/challenge/verify", json={**verify, "code": code})
     assert r.status_code == 200 and r.json()["tokens"]["access"]["token"]
-    assert (await client.post("/auth/2fa/challenge/verify", json={**verify, "code": pyotp.TOTP(secret).now()})).status_code == 401
+    assert (await client.post("/auth/2fa/challenge/verify", json={**verify, "code": code})).status_code == 401
 
 
 async def test_backup_code_works_once(client, outbox):
@@ -281,7 +283,10 @@ async def test_forgot_does_not_send_for_unknown_or_unverified_accounts(client, o
     sent = len(outbox)
     for identifier in ("a@example.com", "nobody@example.com"):
         r = await client.post("/auth/password/forgot", json={"identifier": identifier})
-        assert r.status_code == 200 and r.json()["data"]["channels"] == []
+        data = r.json()["data"]
+        assert r.status_code == 200 and len(data["channels"]) == 1 and data["channels"][0]["type"] == "EMAIL"
+        send = {"resetId": data["resetId"], "channelId": data["channels"][0]["id"]}
+        assert (await client.post("/auth/password/forgot/send", json=send)).status_code == 200
     assert len(outbox) == sent
 
 

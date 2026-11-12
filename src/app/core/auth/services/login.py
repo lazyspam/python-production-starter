@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.security import hash_secret, sha256, verify_secret
@@ -19,7 +20,15 @@ from app.core.auth.services.tokens import AuthTokens, unauthorized
 from app.core.auth.types import AuthUser
 from app.database.session import utcnow
 from app.infrastructure.cache import cache, key
+from app.infrastructure.context import request_info
 from app.locals import msg
+
+
+async def _assert_unregistered(db: AsyncSession, email: str | None, phone: str | None) -> None:
+    if email and await identifier_repo.find_identifier(db, IdentifierType.EMAIL, email):
+        raise HTTPException(status.HTTP_409_CONFLICT, msg.auth.email_already_registered)
+    if phone and await identifier_repo.find_identifier(db, IdentifierType.PHONE, phone):
+        raise HTTPException(status.HTTP_409_CONFLICT, msg.auth.phone_already_registered)
 
 
 @dataclass
@@ -44,10 +53,7 @@ async def finish_login(db: AsyncSession, user_id: str) -> LoginResult:
 async def register(db: AsyncSession, *, email: str | None, phone: str | None, password: str, name: str | None) -> LoginResult:
     email = normalize_email(email) if email else None
     phone = normalize_phone(phone) if phone else None
-    if email and await identifier_repo.find_identifier(db, IdentifierType.EMAIL, email):
-        raise HTTPException(status.HTTP_409_CONFLICT, msg.auth.email_already_registered)
-    if phone and await identifier_repo.find_identifier(db, IdentifierType.PHONE, phone):
-        raise HTTPException(status.HTTP_409_CONFLICT, msg.auth.phone_already_registered)
+    await _assert_unregistered(db, email, phone)
     provider_id = email or phone
     assert provider_id
 
@@ -61,7 +67,13 @@ async def register(db: AsyncSession, *, email: str | None, phone: str | None, pa
         await identifier_repo.add_identifier(db, user.id, IdentifierType.EMAIL, email, primary=True, verified=False)
     if phone:
         await identifier_repo.add_identifier(db, user.id, IdentifierType.PHONE, phone, primary=True, verified=False)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # A concurrent registration took the email or phone between the check above and this insert.
+        await db.rollback()
+        await _assert_unregistered(db, email, phone)
+        raise
 
     for purpose, channel, destination in (
         (Purpose.REGISTER_VERIFY, "email", email),
@@ -84,9 +96,13 @@ async def register(db: AsyncSession, *, email: str | None, phone: str | None, pa
 async def login(db: AsyncSession, *, email: str | None, phone: str | None, password: str) -> LoginResult:
     type_, value = resolve_identifier(email or phone or "")
     identity_hash = sha256(value)
-    fails_key = key(f"login:fail:{identity_hash}")
+    identity_key = key(f"login:fail:{identity_hash}")
+    ip_key = key(f"login:fail:{identity_hash}:{request_info().ip or 'unknown'}")
 
-    if int(await cache.get(fails_key) or 0) >= policy.LOGIN_MAX_FAILS:
+    if (
+        int(await cache.get(ip_key) or 0) >= policy.LOGIN_MAX_FAILS
+        or int(await cache.get(identity_key) or 0) >= policy.LOGIN_MAX_FAILS_PER_IDENTITY
+    ):
         await audit.record("login.lockout", outcome=AuditOutcome.FAILURE, metadata={"identityHash": identity_hash})
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, msg.auth.too_many_failed_attempts)
 
@@ -95,14 +111,16 @@ async def login(db: AsyncSession, *, email: str | None, phone: str | None, passw
     credential = await credential_repo.find_credential(db, user.id, AuthProvider.EMAIL) if user else None
 
     if not await verify_secret(password, credential.password_hash if credential else None) or not user or not credential:
-        await cache.incr(fails_key, expire=policy.LOGIN_LOCKOUT_TTL)
+        await cache.incr(ip_key, expire=policy.LOGIN_LOCKOUT_TTL)
+        await cache.incr(identity_key, expire=policy.LOGIN_LOCKOUT_TTL)
         await audit.record(
             "login.fail", outcome=AuditOutcome.FAILURE, user_id=owner[1].id if owner else None,
             metadata={"identityHash": identity_hash},
         )  # fmt: skip
         raise unauthorized(msg.auth.invalid_credentials)
 
-    await cache.delete(fails_key)
+    await cache.delete(ip_key)
+    await cache.delete(identity_key)
     credential.last_used_at = utcnow()
     await db.commit()
     result = await finish_login(db, user.id)

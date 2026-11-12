@@ -27,13 +27,29 @@ async def list_active_sessions(db: AsyncSession, user_id: str) -> list[Session]:
     ))  # fmt: skip
 
 
-async def find_active_session_by_hash(db: AsyncSession, token_hash: str) -> Session | None:
+async def revoke_active_by_hash(db: AsyncSession, token_hash: str) -> Session | None:
+    """Atomic: one UPDATE ... RETURNING, so a refresh token can be spent by exactly one concurrent request."""
+    now = utcnow()
     return await db.scalar(
-        select(Session).where(
-            Session.refresh_token_hash == token_hash, Session.revoked_at.is_(None), Session.expires_at > utcnow()
-        )
-    )
+        update(Session).where(
+            Session.refresh_token_hash == token_hash, Session.revoked_at.is_(None), Session.expires_at > now
+        ).values(revoked_at=now).returning(Session)
+    )  # fmt: skip
 
 
-async def revoke_user_sessions(db: AsyncSession, user_id: str) -> None:
-    await db.execute(update(Session).where(Session.user_id == user_id, Session.revoked_at.is_(None)).values(revoked_at=utcnow()))
+async def revoke_owned_session(db: AsyncSession, user_id: str, session_id: str) -> str | None:
+    now = utcnow()
+    return await db.scalar(
+        update(Session).where(
+            Session.id == session_id, Session.user_id == user_id, Session.revoked_at.is_(None), Session.expires_at > now
+        ).values(revoked_at=now).returning(Session.id)
+    )  # fmt: skip
+
+
+async def revoke_user_sessions(db: AsyncSession, user_id: str) -> list[str]:
+    """Revokes every live session of a user and returns their ids."""
+    result = await db.scalars(
+        update(Session).where(Session.user_id == user_id, Session.revoked_at.is_(None))
+        .values(revoked_at=utcnow()).returning(Session.id)
+    )  # fmt: skip
+    return list(result)

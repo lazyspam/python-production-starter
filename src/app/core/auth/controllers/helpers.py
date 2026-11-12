@@ -38,8 +38,15 @@ def clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(REFRESH_TOKEN_COOKIE, path=REFRESH_TOKEN_COOKIE_PATH, **options)
 
 
+def no_store(response: Response) -> None:
+    """Router dependency: responses carrying tokens or account data must never be cached by browsers or proxies."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+
 def deliver_tokens(response: Response, tokens: AuthTokens, bearer: bool) -> TokensOut | None:
     """Bearer clients get tokens in the body; everyone else gets httpOnly cookies."""
+    no_store(response)
     if bearer:
         return TokensOut.model_validate(tokens)
     set_auth_cookies(response, tokens)

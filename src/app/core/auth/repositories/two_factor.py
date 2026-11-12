@@ -1,4 +1,6 @@
-from sqlalchemy import delete, func, select, update
+from typing import cast
+
+from sqlalchemy import CursorResult, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth.models import TwoFactorBackupCode, TwoFactorMethod
@@ -26,7 +28,7 @@ async def enabled_methods(db: AsyncSession, user_id: str) -> list[TwoFactorMetho
     ))  # fmt: skip
 
 
-async def add_method(db: AsyncSession, user_id: str, type_: str, **fields: str) -> TwoFactorMethod:
+async def add_method(db: AsyncSession, user_id: str, type_: str, **fields: str | None) -> TwoFactorMethod:
     method = TwoFactorMethod(user_id=user_id, type=type_, **fields)
     db.add(method)
     return method
@@ -55,11 +57,22 @@ async def count_backup_codes(db: AsyncSession, user_id: str) -> int:
 
 async def claim_backup_code(db: AsyncSession, user_id: str, code_hash: str) -> bool:
     """Atomic: one UPDATE, so a code can't be spent twice by concurrent requests."""
-    result = await db.execute(
+    result = cast(CursorResult, await db.execute(
         update(TwoFactorBackupCode).where(
             TwoFactorBackupCode.user_id == user_id,
             TwoFactorBackupCode.code_hash == code_hash,
             TwoFactorBackupCode.used_at.is_(None),
         ).values(used_at=utcnow())
-    )  # fmt: skip
-    return bool(result.rowcount)  # type: ignore[attr-defined]
+    ))  # fmt: skip
+    return bool(result.rowcount)
+
+
+async def claim_totp_step(db: AsyncSession, method_id: str, step: int) -> bool:
+    """Atomic: one UPDATE that only moves the step forward, so one TOTP code is accepted once."""
+    result = cast(CursorResult, await db.execute(
+        update(TwoFactorMethod).where(
+            TwoFactorMethod.id == method_id,
+            or_(TwoFactorMethod.last_totp_step.is_(None), TwoFactorMethod.last_totp_step < step),
+        ).values(last_totp_step=step, last_used_at=utcnow())
+    ))  # fmt: skip
+    return bool(result.rowcount)

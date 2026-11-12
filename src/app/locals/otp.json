@@ -1,0 +1,23 @@
+{
+  "code_line": "Your {wording} code is {code}.",
+  "expiry_line": "This expires in {minutes} minutes.",
+  "link_line": "{subject}: {link}",
+
+  "sign_in_subject": "Your sign-in code",
+  "sign_in_wording": "sign-in",
+  "verify_email_subject": "Verify your email",
+  "verify_phone_subject": "Verify your phone",
+  "verification_wording": "verification",
+  "reset_password_subject": "Reset your password",
+  "reset_password_wording": "reset",
+  "enroll_2fa_subject": "Two-factor enrollment code",
+  "enroll_2fa_wording": "two-factor enrollment",
+  "confirm_email_subject": "Confirm your new email",
+  "confirm_phone_subject": "Confirm your phone number",
+  "confirmation_wording": "confirmation",
+  "phone_confirmation_wording": "phone confirmation",
+  "sudo_subject": "Confirm your identity",
+
+  "email_change_notice_subject": "Your email address change was requested",
+  "email_change_notice_text": "A request was made to change your account email to {email}. If this was not you, sign in and secure your account immediately."
+}

@@ -1,4 +1,6 @@
 import logging
+from collections.abc import MutableMapping
+from typing import Any
 
 import structlog
 from asgi_correlation_id import correlation_id
@@ -19,7 +21,7 @@ from app.configs.settings import get_settings
 from app.database.session import engine
 
 
-def _add_ids(_: object, __: str, event: dict) -> dict:
+def _add_ids(_: Any, __: str, event: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
     span = trace.get_current_span().get_span_context()
     if span.is_valid:
         event["trace_id"] = format(span.trace_id, "032x")

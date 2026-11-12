@@ -1,4 +1,7 @@
 {
   "internal_server_error": "Internal server error",
-  "sms_provider_not_configured": "SMS provider not configured"
+  "sms_provider_not_configured": "SMS provider not configured",
+  "too_many_requests": "Too many requests",
+  "csrf_origin_mismatch": "Request origin is not allowed",
+  "service_not_ready": "Service not ready: {down} unavailable"
 }

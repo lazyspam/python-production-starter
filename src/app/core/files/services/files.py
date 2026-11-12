@@ -1,24 +1,31 @@
 import re
+from datetime import timedelta
 from uuid import UUID, uuid4
 
+import structlog
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.configs.settings import get_settings
-from app.core.files.constants import KEY_PREFIX, LIST_LIMIT
+from app.core.files.constants import CLEANUP_BATCH, KEY_PREFIX, LIST_LIMIT, PENDING_UPLOAD_MIN_AGE
 from app.core.files.models import FileObject, FileStatus, FileVisibility
 from app.core.files.repositories import file as file_repo
 from app.database.session import utcnow
 from app.infrastructure import storage
 from app.locals import msg
 
+log = structlog.get_logger()
 
-def build_object_key(owner_id: str, filename: str) -> str:
-    """Traversal-safe key; the random segment stops same-named uploads from clobbering each other."""
+
+def build_object_key(owner_id: str, filename: str, visibility: FileVisibility) -> str:
+    """Traversal-safe key; the random segment stops same-named uploads from clobbering each other.
+
+    Public and private files live under separate prefixes, so a bucket policy can expose `uploads/public/*` only.
+    """
     base = re.split(r"[\\/]", filename)[-1]
     name = re.sub(r"[^\w.-]+", "_", base)
     name = re.sub(r"_{2,}", "_", name).lstrip("._")[:100]
-    return f"{KEY_PREFIX}/{owner_id}/{uuid4()}/{name or 'file'}"
+    return f"{KEY_PREFIX}/{visibility.lower()}/{owner_id}/{uuid4()}/{name or 'file'}"
 
 
 async def _owned(db: AsyncSession, file_id: UUID, owner_id: str) -> FileObject:
@@ -34,7 +41,7 @@ async def request_upload_url(
     s = get_settings()
     if size > s.s3_max_upload_bytes:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, msg.files.file_too_large)
-    key = build_object_key(owner_id, filename)
+    key = build_object_key(owner_id, filename, visibility)
     url = await storage.create_upload_url(key, content_type, size)
     file = await file_repo.add_file(
         db, owner_id=owner_id, key=key, bucket=s.s3_bucket, content_type=content_type,
@@ -81,3 +88,21 @@ async def delete_file(db: AsyncSession, owner_id: str, file_id: UUID) -> str:
     await file_repo.delete_file(db, file)
     await db.commit()
     return file.id
+
+
+async def cleanup_pending(db: AsyncSession) -> int:
+    """Removes uploads that were started but never confirmed, and their objects if the client uploaded anyway."""
+    max_age = max(PENDING_UPLOAD_MIN_AGE, 2 * get_settings().s3_upload_url_ttl_seconds)
+    stale = await file_repo.list_stale_pending(db, utcnow() - timedelta(seconds=max_age), CLEANUP_BATCH)
+    removed = 0
+    for file in stale:
+        try:
+            await storage.delete_object(file.key)
+        except Exception:
+            # Keep the row so the next run retries; dropping it would orphan the object.
+            log.warning("pending_upload_object_delete_failed", key=file.key, exc_info=True)
+            continue
+        await file_repo.delete_file(db, file)
+        removed += 1
+    await db.commit()
+    return removed

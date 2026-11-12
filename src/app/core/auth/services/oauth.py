@@ -5,8 +5,10 @@ from dataclasses import dataclass
 import jwt
 from fastapi import HTTPException, status
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.security import sha256
 from app.configs.settings import get_settings
 from app.core.audit.services import audit
 from app.core.auth.helpers.normalize import normalize_email
@@ -43,7 +45,8 @@ class Identity:
     name: str | None
 
 
-async def verify_id_token(provider: AuthProvider, id_token: str) -> Identity:
+async def verify_id_token(provider: AuthProvider, id_token: str, nonce: str | None = None) -> Identity:
+    """`nonce` is the raw value the client gave the provider; the token may carry it as is or as its SHA-256 (Apple)."""
     s = get_settings()
     audiences = s.google_client_ids if provider == AuthProvider.GOOGLE else s.apple_client_ids
     if not audiences:
@@ -56,6 +59,8 @@ async def verify_id_token(provider: AuthProvider, id_token: str) -> Identity:
         )  # fmt: skip
     except jwt.PyJWTError as exc:
         raise unauthorized(msg.auth.oauth_token_invalid) from exc
+    if nonce and claims.get("nonce") not in (nonce, sha256(nonce)):
+        raise unauthorized(msg.auth.oauth_token_invalid)
     email = claims.get("email")
     return Identity(
         provider=provider,
@@ -66,7 +71,7 @@ async def verify_id_token(provider: AuthProvider, id_token: str) -> Identity:
     )
 
 
-async def login_or_create(db: AsyncSession, identity: Identity) -> LoginResult:
+async def login_or_create(db: AsyncSession, identity: Identity, *, retry: bool = True) -> LoginResult:
     credential = await credential_repo.find_credential_by_identity(db, identity.provider, identity.provider_id)
     existing = await user_repo.get_user(db, credential.user_id) if credential else None
     if existing and existing.is_deleted is False:
@@ -96,7 +101,14 @@ async def login_or_create(db: AsyncSession, identity: Identity) -> LoginResult:
         await user_repo.add_profile(db, user.id, identity.name)
     if email:
         await identifier_repo.add_identifier(db, user.id, IdentifierType.EMAIL, email, primary=True, verified=True)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # A concurrent first sign-in created the credential or took the email: run again against what now exists.
+        await db.rollback()
+        if not retry:
+            raise
+        return await login_or_create(db, identity, retry=False)
 
     result = await finish_login(db, user.id)
     await audit.record(
@@ -146,13 +158,13 @@ def _provider_named(name: str) -> AuthProvider:
     return provider
 
 
-async def sign_in(db: AsyncSession, provider: AuthProvider, id_token: str) -> LoginResult:
-    return await login_or_create(db, await verify_id_token(provider, id_token))
+async def sign_in(db: AsyncSession, provider: AuthProvider, id_token: str, nonce: str | None = None) -> LoginResult:
+    return await login_or_create(db, await verify_id_token(provider, id_token, nonce))
 
 
-async def link_account(db: AsyncSession, user_id: str, provider_name: str, id_token: str) -> None:
+async def link_account(db: AsyncSession, user_id: str, provider_name: str, id_token: str, nonce: str | None = None) -> None:
     provider = _provider_named(provider_name)
-    await link(db, user_id, await verify_id_token(provider, id_token))
+    await link(db, user_id, await verify_id_token(provider, id_token, nonce))
 
 
 async def unlink_account(db: AsyncSession, user_id: str, provider_name: str) -> None:

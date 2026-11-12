@@ -1,8 +1,12 @@
-import structlog
+from datetime import timedelta
 
+import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.configs import policy
 from app.core.audit.models import AuditOutcome
 from app.core.audit.repositories import activity as activity_repo
-from app.database.session import SessionLocal
+from app.database.session import SessionLocal, utcnow
 from app.infrastructure.context import request_id, request_info
 from app.infrastructure.queue import AUDIT_QUEUE, enqueue
 
@@ -36,3 +40,11 @@ async def write(data: dict) -> None:
     async with SessionLocal() as db:
         await activity_repo.add_activity(db, data)
         await db.commit()
+
+
+async def scrub_deleted_users(db: AsyncSession) -> int:
+    """Strips personal data from audit rows of accounts deleted longer ago than the identifier grace period."""
+    cutoff = utcnow() - timedelta(seconds=policy.IDENTIFIER_RECLAIM_GRACE)
+    count = await activity_repo.scrub_deleted_users(db, cutoff)
+    await db.commit()
+    return count

@@ -3,6 +3,7 @@
 from datetime import timedelta
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.configs import policy
@@ -57,13 +58,22 @@ async def request_add_phone(db: AsyncSession, user_id: str, phone: str) -> None:
     await otp.issue(user_id, Purpose.ADD_PHONE, "sms", value)
 
 
+async def _commit_or_in_use(db: AsyncSession, type_: IdentifierType) -> None:
+    """The unique constraint is the real guard: another account can claim the value after `_assert_free` passed."""
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise _in_use(type_) from exc
+
+
 async def _commit_identifier(db: AsyncSession, user_id: str, type_: IdentifierType, value: str) -> None:
     await _assert_free(db, type_, value)
     is_primary = not await identifier_repo.find_primary(db, user_id, type_)
     identifier = await identifier_repo.add_identifier(db, user_id, type_, value, primary=is_primary, verified=True)
     if is_primary and type_ == IdentifierType.EMAIL:
         await credential_repo.sync_email_credential(db, user_id, value)
-    await db.commit()
+    await _commit_or_in_use(db, type_)
     action = "email.added" if type_ == IdentifierType.EMAIL else "phone.added"
     await audit.record(
         action, user_id=user_id, resource_type="identifier", resource_id=identifier.id,
@@ -139,6 +149,11 @@ async def _replace_primary(db: AsyncSession, user_id: str, type_: IdentifierType
             await identifier_repo.delete_identifier(db, primary)
             await db.flush()
         await identifier_repo.add_identifier(db, user_id, type_, value, primary=True, verified=True)
+        try:
+            await db.flush()
+        except IntegrityError as exc:
+            await db.rollback()
+            raise _in_use(type_) from exc
     if type_ == IdentifierType.EMAIL:
         await credential_repo.sync_email_credential(db, user_id, value)
 
@@ -149,7 +164,7 @@ async def _replace_primary(db: AsyncSession, user_id: str, type_: IdentifierType
         verified = await identifier_repo.list_identifiers(db, user_id, verified_only=True)
         if method.destination not in {i.value for i in verified}:
             method.destination = value
-    await db.commit()
+    await _commit_or_in_use(db, type_)
     await tokens.revoke_all(db, user_id)
 
 
@@ -159,11 +174,8 @@ async def request_email_change(db: AsyncSession, user_id: str, new_email: str) -
     primary = await identifier_repo.find_primary(db, user_id, IdentifierType.EMAIL)
     await otp.issue(user_id, Purpose.CHANGE_EMAIL, "email", email)
     if primary:
-        text = (
-            f"A request was made to change your account email to {email}. "
-            "If this was not you, sign in and secure your account immediately."
-        )
-        await queue_mail(primary.value, "Your email address change was requested", text)
+        text = msg.otp.email_change_notice_text.format(email=email)
+        await queue_mail(primary.value, msg.otp.email_change_notice_subject, text)
     await audit.record("email.change.requested", user_id=user_id, resource_type="identifier", metadata={"email": email})
 
 

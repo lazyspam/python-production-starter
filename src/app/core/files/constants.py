@@ -1,5 +1,8 @@
 KEY_PREFIX = "uploads"
 LIST_LIMIT = 50
+# PENDING rows (upload URL issued, never confirmed) older than this are removed: max(this, 2x the upload URL TTL).
+PENDING_UPLOAD_MIN_AGE = 24 * 3600
+CLEANUP_BATCH = 500
 # Allowlist, not a UX hint: extend deliberately.
 ALLOWED_CONTENT_TYPES = (
     "image/jpeg", "image/png", "image/webp", "image/gif", "image/avif", "application/pdf",

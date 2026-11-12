@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 
 from app.common.rate_limit import limit
 from app.common.schemas import Envelope
 from app.core.auth.constants import REFRESH_TOKEN_COOKIE
-from app.core.auth.controllers.helpers import clear_auth_cookies, deliver_tokens, login_response
+from app.core.auth.controllers.helpers import clear_auth_cookies, deliver_tokens, login_response, no_store
 from app.core.auth.deps import AuthAny, Sudo, SudoConsume
 from app.core.auth.dto.request.session import IdTokenIn, LoginIn, RefreshIn, RegisterIn
 from app.core.auth.dto.response.session import AuthEnvelope, AuthUserOut, SessionOut
@@ -15,7 +15,7 @@ from app.core.auth.services.tokens import unauthorized
 from app.database.session import Db
 from app.locals import msg
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(no_store)])
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED, dependencies=[limit(5)])
@@ -31,7 +31,7 @@ async def login(body: LoginIn, request: Request, response: Response, db: Db) -> 
 
 
 async def _oauth_login(provider: AuthProvider, body: IdTokenIn, request: Request, response: Response, db: Db) -> AuthEnvelope:
-    result = await oauth.sign_in(db, provider, body.id_token)
+    result = await oauth.sign_in(db, provider, body.id_token, body.nonce)
     return login_response(result, request, response, msg.auth.oauth_login_successful)
 
 
@@ -47,7 +47,7 @@ async def oauth_apple(body: IdTokenIn, request: Request, response: Response, db:
 
 @router.post("/oauth/{provider}/link")
 async def oauth_link(provider: str, body: IdTokenIn, user: Sudo, db: Db) -> Envelope[None]:
-    await oauth.link_account(db, user.sub, provider, body.id_token)
+    await oauth.link_account(db, user.sub, provider, body.id_token, body.nonce)
     return Envelope(message=msg.auth.oauth_linked)
 
 

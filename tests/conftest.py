@@ -25,18 +25,26 @@ BEARER = {"X-Auth-Transport": "bearer"}
 PASSWORD = "correct-horse-battery"
 
 
+def _first_group(pattern: str, text: str) -> str:
+    match = re.search(pattern, text)
+    assert match, f"no match for {pattern!r} in {text!r}"
+    return match.group(1)
+
+
 class Outbox(list):
     """Everything the app queued, instead of a real queue. `code_for` reads the latest code sent to someone."""
+
+    audit: list
 
     def latest(self, to: str) -> dict:
         return next(m for m in reversed(self) if m.get("to") == to)
 
     def code_for(self, to: str) -> str:
         message = self.latest(to)
-        return re.search(r"\b(\d{6})\b", message.get("text") or message["body"]).group(1)
+        return _first_group(r"\b(\d{6})\b", message.get("text") or message["body"])
 
     def token_for(self, to: str) -> str:
-        return re.search(r"token=([0-9a-f]+)", self.latest(to)["text"]).group(1)
+        return _first_group(r"token=([0-9a-f]+)", self.latest(to)["text"])
 
 
 @pytest.fixture(scope="session", autouse=True)

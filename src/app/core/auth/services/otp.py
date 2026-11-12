@@ -45,23 +45,36 @@ class PurposeConfig:
     """Set when the email also carries a link."""
 
 
+_t = msg.otp
 _PURPOSES = {
-    Purpose.LOGIN: PurposeConfig(policy.TWO_FACTOR_CHALLENGE_TTL, "Your sign-in code", "sign-in"),
-    Purpose.REGISTER_VERIFY: PurposeConfig(policy.EMAIL_VERIFY_TTL, "Verify your email", "verification", "verify-email"),
-    Purpose.REGISTER_VERIFY_PHONE: PurposeConfig(policy.EMAIL_VERIFY_TTL, "Verify your phone", "verification"),
-    Purpose.RESET_PASSWORD: PurposeConfig(policy.PASSWORD_RESET_TTL, "Reset your password", "reset", "reset-password"),
-    Purpose.ENROLL_2FA: PurposeConfig(policy.OTP_TTL, "Two-factor enrollment code", "two-factor enrollment"),
-    Purpose.CHANGE_EMAIL: PurposeConfig(policy.IDENTIFIER_CHANGE_TTL, "Confirm your new email", "confirmation", "confirm-email"),
-    Purpose.ADD_EMAIL: PurposeConfig(policy.IDENTIFIER_CHANGE_TTL, "Confirm your new email", "confirmation", "confirm-email"),
-    Purpose.ADD_PHONE: PurposeConfig(policy.IDENTIFIER_CHANGE_TTL, "Confirm your phone number", "phone confirmation"),
-    Purpose.CHANGE_PHONE: PurposeConfig(policy.IDENTIFIER_CHANGE_TTL, "Confirm your phone number", "phone confirmation"),
-    Purpose.SUDO: PurposeConfig(policy.OTP_SUDO_TTL, "Confirm your identity", "confirmation"),
-    Purpose.SUDO_2FA: PurposeConfig(policy.OTP_SUDO_TTL, "Confirm your identity", "confirmation"),
+    Purpose.LOGIN: PurposeConfig(policy.TWO_FACTOR_CHALLENGE_TTL, _t.sign_in_subject, _t.sign_in_wording),
+    Purpose.REGISTER_VERIFY: PurposeConfig(
+        policy.EMAIL_VERIFY_TTL, _t.verify_email_subject, _t.verification_wording, "verify-email"
+    ),
+    Purpose.REGISTER_VERIFY_PHONE: PurposeConfig(policy.EMAIL_VERIFY_TTL, _t.verify_phone_subject, _t.verification_wording),
+    Purpose.RESET_PASSWORD: PurposeConfig(
+        policy.PASSWORD_RESET_TTL, _t.reset_password_subject, _t.reset_password_wording, "reset-password"
+    ),
+    Purpose.ENROLL_2FA: PurposeConfig(policy.OTP_TTL, _t.enroll_2fa_subject, _t.enroll_2fa_wording),
+    Purpose.CHANGE_EMAIL: PurposeConfig(
+        policy.IDENTIFIER_CHANGE_TTL, _t.confirm_email_subject, _t.confirmation_wording, "confirm-email"
+    ),
+    Purpose.ADD_EMAIL: PurposeConfig(
+        policy.IDENTIFIER_CHANGE_TTL, _t.confirm_email_subject, _t.confirmation_wording, "confirm-email"
+    ),
+    Purpose.ADD_PHONE: PurposeConfig(policy.IDENTIFIER_CHANGE_TTL, _t.confirm_phone_subject, _t.phone_confirmation_wording),
+    Purpose.CHANGE_PHONE: PurposeConfig(policy.IDENTIFIER_CHANGE_TTL, _t.confirm_phone_subject, _t.phone_confirmation_wording),
+    Purpose.SUDO: PurposeConfig(policy.OTP_SUDO_TTL, _t.sudo_subject, _t.confirmation_wording),
+    Purpose.SUDO_2FA: PurposeConfig(policy.OTP_SUDO_TTL, _t.sudo_subject, _t.confirmation_wording),
 }  # fmt: skip
 
 
 def _session_key(user_id: str, purpose: str, channel: str) -> str:
     return key(f"otp:session:{user_id}:{purpose}:{channel}")
+
+
+def _attempts_key(user_id: str, purpose: str, channel: str) -> str:
+    return key(f"otp:attempts:{user_id}:{purpose}:{channel}")
 
 
 def _token_key(token_hash: str) -> str:
@@ -72,24 +85,28 @@ def _too_many(message: str) -> HTTPException:
     return HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, message)
 
 
-async def _destroy(record: dict) -> None:
-    await cache.delete(_session_key(record["user_id"], record["purpose"], record["channel"]))
+async def _destroy(record: dict) -> bool:
+    """True only for the one caller that actually removed the session."""
+    removed = await cache.delete(_session_key(record["user_id"], record["purpose"], record["channel"]))
+    await cache.delete(_attempts_key(record["user_id"], record["purpose"], record["channel"]))
     if record.get("token_hash"):
         await cache.delete(_token_key(record["token_hash"]))
+    return bool(removed)
 
 
 async def _send(config: PurposeConfig, channel: str, destination: str, code: str, token: str | None) -> None:
-    minutes = round(config.ttl / 60)
-    expiry = f"This expires in {minutes} minutes."
-    code_line = f"Your {config.wording} code is {code}."
+    expiry = msg.otp.expiry_line.format(minutes=round(config.ttl / 60))
+    code_line = msg.otp.code_line.format(wording=config.wording, code=code)
     if channel == "sms":
         await queue_sms(destination, f"{code_line} {expiry}")
         return
     link = None
     if token and config.link_path:
         link = f"{get_settings().frontend_url.rstrip('/')}/{config.link_path}?token={token}"
-    text = "\n\n".join(p for p in (f"{config.subject}: {link}" if link else None, code_line, expiry) if p)
-    link_html = f'<p>{config.subject}: <a href="{html.escape(link)}">{html.escape(link)}</a></p>' if link else ""
+    link_line = msg.otp.link_line.format(subject=config.subject, link=link) if link else None
+    text = "\n\n".join(p for p in (link_line, code_line, expiry) if p)
+    anchor = f'<a href="{html.escape(link)}">{html.escape(link)}</a>' if link else ""
+    link_html = f"<p>{msg.otp.link_line.format(subject=html.escape(config.subject), link=anchor)}</p>" if link else ""
     await queue_mail(destination, config.subject, text, f"{link_html}<p>{code_line}</p><p>{expiry}</p>")
 
 
@@ -116,10 +133,11 @@ async def issue(user_id: str, purpose: Purpose, channel: Channel, destination: s
     token_hash = sha256(token) if token else None
     record = {
         "user_id": user_id, "purpose": purpose.value, "channel": channel, "destination": destination,
-        "code_hash": await hash_secret(code), "token_hash": token_hash, "attempts": 0,
+        "code_hash": await hash_secret(code), "token_hash": token_hash,
         "sent_at": now, "expires_at": now + config.ttl,
     }  # fmt: skip
     await cache.set(_session_key(user_id, purpose, channel), record, expire=config.ttl)
+    await cache.delete(_attempts_key(user_id, purpose, channel))
     if token_hash:
         index = {"user_id": user_id, "purpose": purpose.value, "channel": channel}
         await cache.set(_token_key(token_hash), index, expire=config.ttl)
@@ -127,19 +145,16 @@ async def issue(user_id: str, purpose: Purpose, channel: Channel, destination: s
 
 
 async def verify_code(user_id: str, purpose: Purpose, channel: Channel, code: str) -> dict:
-    """Returns the consumed session. Wrong codes count against it; too many destroy it."""
-    session_key = _session_key(user_id, purpose, channel)
-    record = await cache.get(session_key)
+    """Returns the consumed session. Each try reserves an attempt atomically first, so parallel guesses can't exceed the cap."""
+    record = await cache.get(_session_key(user_id, purpose, channel))
     if not record:
         raise unauthorized(msg.auth.code_invalid_or_expired)
-    if record["attempts"] >= policy.OTP_MAX_ATTEMPTS:
+    ttl = max(1, math.ceil(record["expires_at"] - time.time()))
+    if await cache.incr(_attempts_key(user_id, purpose, channel), expire=ttl) > policy.OTP_MAX_ATTEMPTS:
         await _destroy(record)
         raise _too_many(msg.auth.too_many_incorrect_attempts)
-    if not await verify_secret(code, record["code_hash"]):
-        ttl = max(1, math.ceil(record["expires_at"] - time.time()))
-        await cache.set(session_key, {**record, "attempts": record["attempts"] + 1}, expire=ttl)
+    if not await verify_secret(code, record["code_hash"]) or not await _destroy(record):
         raise unauthorized(msg.auth.code_invalid_or_expired)
-    await _destroy(record)
     return record
 
 
@@ -149,8 +164,7 @@ async def verify_token(raw_token: str, purpose: Purpose) -> dict:
     if not index or index["purpose"] != purpose:
         raise unauthorized(msg.auth.link_invalid_or_expired)
     record = await cache.get(_session_key(index["user_id"], index["purpose"], index["channel"]))
-    if not record or record.get("token_hash") != token_hash:
+    if not record or record.get("token_hash") != token_hash or not await _destroy(record):
         await cache.delete(_token_key(token_hash))
         raise unauthorized(msg.auth.link_invalid_or_expired)
-    await _destroy(record)
     return record

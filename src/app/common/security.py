@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import secrets
 
 from cryptography.fernet import Fernet
@@ -24,6 +25,12 @@ async def verify_secret(value: str, hashed: str | None) -> bool:
 
 def sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def keyed_hash(value: str, purpose: str) -> str:
+    """HMAC-SHA256 under the server key, for low-entropy secrets a leaked table must not give away (backup codes)."""
+    message = f"{purpose}:{value}".encode()
+    return hmac.new(get_settings().auth_encryption_key.encode(), message, hashlib.sha256).hexdigest()
 
 
 def random_token(n_bytes: int = 32) -> str:

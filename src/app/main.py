@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import socketio
@@ -6,7 +6,7 @@ from asgi_correlation_id import CorrelationIdMiddleware
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.common.errors import register_error_handlers
+from app.common.errors import UnhandledErrorMiddleware, register_error_handlers
 from app.common.rate_limit import limit
 from app.configs.settings import get_settings
 from app.core.auth.controllers import identifier, password, session, sudo, two_factor, verify
@@ -17,6 +17,7 @@ from app.database import models  # noqa: F401
 from app.database.session import engine
 from app.infrastructure.cache import cache, setup_cache
 from app.infrastructure.context import RequestContextMiddleware
+from app.infrastructure.csrf import CsrfMiddleware
 from app.infrastructure.observability import setup_logging, setup_telemetry
 from app.infrastructure.queue import close_queues
 from app.infrastructure.realtime import sio
@@ -27,7 +28,7 @@ setup_cache()
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
     yield
     await close_queues()
     await cache.close()
@@ -41,6 +42,9 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None if settings.is_production else "/api/openapi.json",
 )
+# Added innermost first: errors and CSRF rejections still pass through the security headers, request id and CORS.
+app.add_middleware(UnhandledErrorMiddleware)
+app.add_middleware(CsrfMiddleware)
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(

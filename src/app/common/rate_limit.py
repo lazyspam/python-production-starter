@@ -1,6 +1,7 @@
 from fastapi import Depends, HTTPException, Request, status
 
 from app.infrastructure.cache import cache, key
+from app.locals import msg
 
 
 def limit(times: int, seconds: int = 60):
@@ -10,6 +11,6 @@ def limit(times: int, seconds: int = 60):
         route = getattr(request.scope.get("route"), "path", request.url.path)
         ip = request.client.host if request.client else "unknown"
         if await cache.incr(key(f"rl:{route}:{ip}:{times}:{seconds}"), expire=seconds) > times:
-            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many requests")
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, msg.error.too_many_requests)
 
     return Depends(dependency)

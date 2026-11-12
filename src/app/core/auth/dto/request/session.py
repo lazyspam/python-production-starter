@@ -1,6 +1,6 @@
-from typing import Self
+from typing import Annotated, Self
 
-from pydantic import EmailStr, model_validator
+from pydantic import EmailStr, StringConstraints, model_validator
 
 from app.common.schemas import Schema
 from app.core.auth.dto.request.common import LongToken, OptionalName, Password, Phone
@@ -34,6 +34,8 @@ class LoginIn(Schema):
 
 class IdTokenIn(Schema):
     id_token: LongToken
+    nonce: Annotated[str, StringConstraints(min_length=8, max_length=256)] | None = None
+    """The raw nonce the client passed to the provider. When sent, the ID token must carry it."""
 
 
 class RefreshIn(Schema):

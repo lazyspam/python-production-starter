@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from app.core.health.repositories import health as health_repo
 from app.database.session import SessionLocal
 from app.infrastructure.cache import cache
+from app.locals import msg
 
 _started = time.monotonic()
 
@@ -24,8 +25,5 @@ async def readiness() -> dict:
         checks["redis"] = "up"
     except Exception as exc:
         down = ", ".join(name for name, state in checks.items() if state == "down")
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"Service not ready: {down} unavailable",
-        ) from exc
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, msg.error.service_not_ready.format(down=down)) from exc
     return {**liveness(), "checks": checks}

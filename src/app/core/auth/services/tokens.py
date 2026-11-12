@@ -15,6 +15,7 @@ from app.core.fcm_token.repositories import fcm_token as fcm_token_repo
 from app.database.session import utcnow
 from app.infrastructure.cache import cache, key
 from app.infrastructure.context import request_info
+from app.infrastructure.realtime import disconnect_session
 from app.locals import msg
 
 ALGORITHM = "HS256"
@@ -83,30 +84,49 @@ async def refresh(db: AsyncSession, presented: str) -> AuthTokens:
         await revoke_all(db, user_id)
         raise unauthorized(msg.auth.account_no_longer_available)
 
-    session = await session_repo.find_active_session_by_hash(db, sha256(presented))
+    session = await session_repo.revoke_active_by_hash(db, sha256(presented))
     if not session or session.user_id != user_id:
         # A valid token with no live session is a replayed, already-rotated token: end every session.
         await revoke_all(db, user_id)
         raise unauthorized(msg.auth.refresh_token_required)
 
-    session.revoked_at = utcnow()
-    await db.commit()
-    await cache.delete(sudo_key(user_id, session.id))
-    return await issue(db, user_id)
+    issued = await issue(db, user_id)  # commits the rotation and the new session together
+    await finish_revoke(user_id, [session.id])
+    return issued
 
 
 async def revoke(db: AsyncSession, presented: str) -> None:
-    session = await session_repo.find_active_session_by_hash(db, sha256(presented))
+    session = await session_repo.revoke_active_by_hash(db, sha256(presented))
     if session:
-        session.revoked_at = utcnow()
         await db.commit()
-        await cache.delete(sudo_key(session.user_id, session.id))
+        await finish_revoke(session.user_id, [session.id])
+
+
+def _revoked_key(session_id: str) -> str:
+    return key(f"revoked-session:{session_id}")
+
+
+async def is_session_revoked(session_id: str) -> bool:
+    return bool(await cache.get(_revoked_key(session_id)))
+
+
+async def finish_revoke(user_id: str, session_ids: list[str]) -> None:
+    """After the revocation is committed: refuse the sessions' access tokens until they expire, end sudo and sockets."""
+    ttl = get_settings().jwt_access_ttl_seconds
+    for session_id in session_ids:
+        await cache.set(_revoked_key(session_id), True, expire=ttl)
+        await cache.delete(sudo_key(user_id, session_id))
+        await disconnect_session(session_id)
+
+
+async def stage_revoke_all(db: AsyncSession, user_id: str) -> list[str]:
+    """revoke_all without the commit, for callers that must change something else in the same transaction."""
+    session_ids = await session_repo.revoke_user_sessions(db, user_id)
+    await fcm_token_repo.delete_for_user(db, user_id)
+    return session_ids
 
 
 async def revoke_all(db: AsyncSession, user_id: str) -> None:
-    sessions = await session_repo.list_active_sessions(db, user_id)
-    await session_repo.revoke_user_sessions(db, user_id)
-    await fcm_token_repo.delete_for_user(db, user_id)
+    session_ids = await stage_revoke_all(db, user_id)
     await db.commit()
-    for session in sessions:
-        await cache.delete(sudo_key(user_id, session.id))
+    await finish_revoke(user_id, session_ids)

@@ -1,7 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.common.rate_limit import limit
 from app.common.schemas import Envelope
+from app.core.auth.controllers.helpers import no_store
 from app.core.auth.deps import Auth, SudoConsume
 from app.core.auth.dto.request.common import PasswordIn
 from app.core.auth.dto.request.password import ChangePasswordIn, ForgotIn, ResetCodeIn, ResetIn, SendResetIn
@@ -10,7 +11,7 @@ from app.core.auth.services import password
 from app.database.session import Db
 from app.locals import msg
 
-router = APIRouter(prefix="/password")
+router = APIRouter(prefix="/password", dependencies=[Depends(no_store)])
 
 
 @router.post("/forgot", dependencies=[limit(5)])

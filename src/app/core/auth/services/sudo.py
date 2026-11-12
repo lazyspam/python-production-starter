@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.mask import mask_email, mask_phone
 from app.common.security import verify_secret
-from app.configs.policy import SUDO_GRANT_TTL
+from app.configs.policy import SUDO_GRANT_TTL, SUDO_LOCKOUT_TTL, SUDO_MAX_FAILS
 from app.core.auth.models import AuthProvider, IdentifierType, TwoFactorType
 from app.core.auth.repositories import credential as credential_repo
 from app.core.auth.repositories import identifier as identifier_repo
@@ -16,7 +16,7 @@ from app.core.auth.services import otp, two_factor
 from app.core.auth.services.otp import Purpose
 from app.core.auth.services.tokens import sudo_key, unauthorized
 from app.database.session import utcnow
-from app.infrastructure.cache import cache, take
+from app.infrastructure.cache import cache, key, take
 from app.locals import msg
 
 _INACTIVE = {"active": False, "expires_at": None, "method": None}
@@ -32,9 +32,20 @@ def _mask(type_: str, destination: str | None) -> str | None:
     return mask_email(destination) if type_ in ("email", TwoFactorType.EMAIL_OTP) else mask_phone(destination)
 
 
+def _fails_key(user_id: str) -> str:
+    return key(f"sudo:fail:{user_id}")
+
+
+async def _reserve_attempt(user_id: str) -> None:
+    """Counts the try before checking it, so parallel guesses can't slip past the cap. A grant clears the count."""
+    if await cache.incr(_fails_key(user_id), expire=SUDO_LOCKOUT_TTL) > SUDO_MAX_FAILS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, msg.auth.too_many_sudo_attempts)
+
+
 async def _mint(user_id: str, session_id: str | None, method: str) -> dict:
     if not session_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, msg.auth.sudo_session_required)
+    await cache.delete(_fails_key(user_id))
     grant = {"active": True, "method": method, "expires_at": int((time.time() + SUDO_GRANT_TTL) * 1000)}
     await cache.set(sudo_key(user_id, session_id), grant, expire=SUDO_GRANT_TTL)
     return grant
@@ -81,6 +92,7 @@ async def elevate_with_password(db: AsyncSession, user_id: str, session_id: str 
     credential = await credential_repo.find_credential(db, user_id, AuthProvider.EMAIL)
     if not credential or not credential.password_hash:
         raise unauthorized(msg.auth.no_password_credential)
+    await _reserve_attempt(user_id)
     if not await verify_secret(password, credential.password_hash):
         raise unauthorized(msg.auth.sudo_elevation_failed)
     return await _mint(user_id, session_id, "password")
@@ -96,6 +108,7 @@ async def request_otp(db: AsyncSession, user_id: str, channel: str) -> None:
 
 
 async def elevate_with_otp(user_id: str, session_id: str | None, channel: str, code: str) -> dict:
+    await _reserve_attempt(user_id)
     try:
         await otp.verify_code(user_id, Purpose.SUDO, channel, code)
     except HTTPException as exc:
@@ -115,11 +128,12 @@ async def request_two_factor_otp(db: AsyncSession, user_id: str, type_: TwoFacto
 async def elevate_with_two_factor(
     db: AsyncSession, user_id: str, session_id: str | None, type_: TwoFactorType, code: str
 ) -> dict:
+    await _reserve_attempt(user_id)
     method = await two_factor_repo.find_method(db, user_id, type_)
     ok = False
     if method and method.is_enabled:
         if type_ == TwoFactorType.TOTP:
-            ok = bool(method.secret) and two_factor.verify_totp(method.secret or "", code)
+            ok = await two_factor.verify_totp(db, method, code)
         else:
             try:
                 await otp.verify_code(user_id, Purpose.SUDO_2FA, two_factor.channel_of(type_), code)

@@ -1,9 +1,12 @@
+import hmac
+import time
+
 import pyotp
 import segno
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.security import decrypt, encrypt, random_token, sha256
+from app.common.security import decrypt, encrypt, keyed_hash, random_token
 from app.configs import policy
 from app.configs.settings import get_settings
 from app.core.audit.services import audit
@@ -26,15 +29,37 @@ def _challenge_key(challenge_id: str) -> str:
     return key(f"2fa-challenge:{challenge_id}")
 
 
+def _challenge_attempts_key(challenge_id: str) -> str:
+    return key(f"2fa-challenge-attempts:{challenge_id}")
+
+
+def _user_fails_key(user_id: str) -> str:
+    return key(f"2fa:fail:{user_id}")
+
+
+def _backup_hash(code: str) -> str:
+    return keyed_hash(code.strip().lower(), "backup-code")
+
+
 def channel_of(type_: str) -> str:
     return _CHANNELS[TwoFactorType(type_)]
 
 
-def verify_totp(secret_ciphertext: str, code: str) -> bool:
-    return pyotp.TOTP(decrypt(secret_ciphertext)).verify(code, valid_window=get_settings().totp_window)
+def _matched_step(secret_ciphertext: str, code: str) -> int | None:
+    """The time step the code belongs to, within the allowed window, or None."""
+    totp = pyotp.TOTP(decrypt(secret_ciphertext))
+    current, window = int(time.time()) // totp.interval, get_settings().totp_window
+    steps = range(current - window, current + window + 1)
+    return next((step for step in steps if hmac.compare_digest(totp.generate_otp(step), code)), None)
 
 
-async def _upsert_method(db: AsyncSession, user_id: str, type_: TwoFactorType, **fields: str) -> TwoFactorMethod:
+async def verify_totp(db: AsyncSession, method: TwoFactorMethod, code: str) -> bool:
+    """Accepts each code once: the matched step must be newer than the last accepted one. The caller commits."""
+    step = _matched_step(method.secret, code) if method.secret else None
+    return step is not None and await two_factor_repo.claim_totp_step(db, method.id, step)
+
+
+async def _upsert_method(db: AsyncSession, user_id: str, type_: TwoFactorType, **fields: str | None) -> TwoFactorMethod:
     method = await two_factor_repo.find_method(db, user_id, type_)
     if method:
         for name, value in fields.items():
@@ -63,7 +88,7 @@ async def enroll_totp(db: AsyncSession, user_id: str) -> dict:
         raise HTTPException(status.HTTP_409_CONFLICT, msg.auth.totp_already_enabled)
 
     secret = pyotp.random_base32()
-    method = await _upsert_method(db, user.id, TwoFactorType.TOTP, secret=encrypt(secret))
+    method = await _upsert_method(db, user.id, TwoFactorType.TOTP, secret=encrypt(secret), last_totp_step=None)
     email = await identifier_repo.find_primary(db, user.id, IdentifierType.EMAIL)
     url = pyotp.TOTP(secret).provisioning_uri(email.value if email else user.id, issuer_name=get_settings().totp_issuer)
     return {"method_id": method.id, "secret": secret, "otpauth_url": url, "qr_data_url": segno.make(url).png_data_uri(scale=5)}
@@ -76,7 +101,7 @@ async def confirm_totp(db: AsyncSession, user_id: str, code: str) -> list[str] |
         raise HTTPException(status.HTTP_404_NOT_FOUND, msg.auth.totp_enrollment_not_started)
     if method.is_enabled:
         raise HTTPException(status.HTTP_409_CONFLICT, msg.auth.totp_already_enabled)
-    if not verify_totp(method.secret, code):
+    if not await verify_totp(db, method, code):
         raise unauthorized(msg.auth.invalid_authenticator_code)
     await _enable(db, method)
     return await issue_backup_codes_if_none(db, user_id)
@@ -136,7 +161,7 @@ async def disable(db: AsyncSession, user_id: str, method_id: str) -> None:
 async def _replace_backup_codes(db: AsyncSession, user_id: str) -> list[str]:
     codes = [random_token(policy.BACKUP_CODE_BYTES) for _ in range(policy.BACKUP_CODE_COUNT)]
     await two_factor_repo.delete_backup_codes(db, user_id)
-    await two_factor_repo.add_backup_codes(db, user_id, [sha256(code) for code in codes])
+    await two_factor_repo.add_backup_codes(db, user_id, [_backup_hash(code) for code in codes])
     await db.commit()
     return codes
 
@@ -156,7 +181,7 @@ async def regenerate_backup_codes(db: AsyncSession, user_id: str) -> list[str]:
 
 
 async def claim_backup_code(db: AsyncSession, user_id: str, code: str) -> bool:
-    claimed = await two_factor_repo.claim_backup_code(db, user_id, sha256(code))
+    claimed = await two_factor_repo.claim_backup_code(db, user_id, _backup_hash(code))
     await db.commit()
     return claimed
 
@@ -185,6 +210,8 @@ async def send_challenge_code(db: AsyncSession, challenge_id: str, type_: TwoFac
 
 
 async def verify_challenge(db: AsyncSession, challenge_id: str, type_: TwoFactorType, code: str) -> tokens.AuthTokens:
+    """Every try reserves an attempt atomically before checking, per challenge and per user, so parallel or repeated
+    logins can't buy more guesses."""
     challenge_key = _challenge_key(challenge_id)
     record = await cache.get(challenge_key)
     if not record:
@@ -192,6 +219,15 @@ async def verify_challenge(db: AsyncSession, challenge_id: str, type_: TwoFactor
     user = await user_repo.find_user(db, record["user_id"])
     if not user or user.status != UserStatus.ACTIVE:
         raise unauthorized(msg.auth.account_no_longer_available)
+
+    fails_key = _user_fails_key(user.id)
+    if await cache.incr(fails_key, expire=policy.TWO_FACTOR_LOCKOUT_TTL) > policy.TWO_FACTOR_MAX_FAILS:
+        await cache.delete(challenge_key)
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, msg.auth.too_many_two_factor_attempts)
+    attempts = await cache.incr(_challenge_attempts_key(challenge_id), expire=policy.TWO_FACTOR_CHALLENGE_TTL)
+    if attempts > policy.OTP_MAX_ATTEMPTS:
+        await cache.delete(challenge_key)
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, msg.auth.too_many_incorrect_attempts)
 
     methods = await two_factor_repo.enabled_methods(db, user.id)
     method = next((m for m in methods if m.type == type_ and m.id in record["method_ids"]), None)
@@ -201,7 +237,7 @@ async def verify_challenge(db: AsyncSession, challenge_id: str, type_: TwoFactor
     if type_ == TwoFactorType.TOTP:
         if not method.secret:
             raise HTTPException(status.HTTP_403_FORBIDDEN, msg.auth.totp_method_missing_secret)
-        ok = verify_totp(method.secret, code)
+        ok = await verify_totp(db, method, code)
     else:
         try:
             await otp.verify_code(user.id, Purpose.LOGIN, _CHANNELS[type_], code)
@@ -210,15 +246,15 @@ async def verify_challenge(db: AsyncSession, challenge_id: str, type_: TwoFactor
             ok = False
 
     if not ok and not await claim_backup_code(db, user.id, code):
-        attempts = record["attempts"] + 1
         if attempts >= policy.OTP_MAX_ATTEMPTS:
             await cache.delete(challenge_key)
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, msg.auth.too_many_incorrect_attempts)
-        await cache.set(challenge_key, {**record, "attempts": attempts}, expire=policy.TWO_FACTOR_CHALLENGE_TTL)
         raise unauthorized(msg.auth.invalid_code)
 
     if not await take(challenge_key):
         raise unauthorized(msg.auth.challenge_invalid_or_expired)
+    await cache.delete(fails_key)
+    await cache.delete(_challenge_attempts_key(challenge_id))
     method.last_used_at = utcnow()
     await db.commit()
     return await tokens.issue(db, user.id)

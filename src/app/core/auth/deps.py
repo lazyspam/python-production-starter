@@ -10,7 +10,7 @@ from app.core.auth.models import UserStatus
 from app.core.auth.repositories import identifier as identifier_repo
 from app.core.auth.repositories import user as user_repo
 from app.core.auth.services import sudo
-from app.core.auth.services.tokens import decode_access_token, unauthorized
+from app.core.auth.services.tokens import decode_access_token, is_session_revoked, unauthorized
 from app.database.session import Db
 from app.locals import msg
 
@@ -27,8 +27,8 @@ class CurrentUser:
 async def _current_user(request: Request, db: Db, credentials=Depends(_bearer)) -> CurrentUser:
     token = credentials.credentials if credentials else request.cookies.get(ACCESS_TOKEN_COOKIE)
     payload = decode_access_token(token) if token else None
-    if not payload:
-        raise unauthorized("Unauthorized")
+    if not payload or (payload.get("sid") and await is_session_revoked(payload["sid"])):
+        raise unauthorized(msg.auth.unauthorized)
     user = await user_repo.find_user(db, payload["sub"])
     if not user or user.status != UserStatus.ACTIVE:
         raise unauthorized(msg.auth.account_no_longer_available)

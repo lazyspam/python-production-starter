@@ -1,6 +1,7 @@
 from datetime import datetime
+from typing import cast
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth.models import IdentifierType, User, UserIdentifier
@@ -78,5 +79,5 @@ async def clear_primary(db: AsyncSession, user_id: str, type_: IdentifierType) -
 
 async def delete_held_by_deleted_users(db: AsyncSession, deleted_before: datetime) -> int:
     deleted = select(User.id).where(User.is_deleted.is_(True), User.deleted_at <= deleted_before)
-    result = await db.execute(delete(UserIdentifier).where(UserIdentifier.user_id.in_(deleted)))
-    return result.rowcount  # type: ignore[attr-defined]
+    result = cast(CursorResult, await db.execute(delete(UserIdentifier).where(UserIdentifier.user_id.in_(deleted))))
+    return result.rowcount

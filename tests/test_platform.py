@@ -11,7 +11,7 @@ from app.core.audit.services.audit import write
 from app.core.fcm_token.models import FcmToken
 from app.database.session import SessionLocal
 from app.infrastructure.cache import cache
-from app.infrastructure.queue import AUDIT_QUEUE, close_queues, connection_options, get_queue
+from app.infrastructure.queue import AUDIT_QUEUE, close_queues, get_queue, worker_options
 from app.locals import msg
 from app.worker import PROCESSORS
 from tests.conftest import auth, verified_user
@@ -131,7 +131,7 @@ async def test_file_upload_flow_with_presigned_urls_and_ownership(client, outbox
 
 async def test_real_queue_and_worker_write_an_audit_row():
     """No fakes: a job goes through BullMQ on Redis to a real worker and into Postgres."""
-    worker = Worker(AUDIT_QUEUE, PROCESSORS[AUDIT_QUEUE], connection_options())
+    worker = Worker(AUDIT_QUEUE, PROCESSORS[AUDIT_QUEUE], worker_options())
     data = {
         "module": "auth", "action": "queue.test", "outcome": "SUCCESS", "user_id": None, "resource_type": None,
         "resource_id": None, "metadata_": {"x": 1}, "ip_address": None, "user_agent": None, "request_id": None,

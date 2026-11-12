@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Index, String, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.session import Base, IdMixin, TimestampMixin
@@ -113,6 +113,8 @@ class TwoFactorMethod(IdMixin, TimestampMixin, Base):
     secret: Mapped[str | None] = mapped_column(String(512))
     destination: Mapped[str | None] = mapped_column(String(320))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_totp_step: Mapped[int | None] = mapped_column(Integer)
+    """Time step of the last accepted TOTP code; a code from the same or an earlier step is a replay."""
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
