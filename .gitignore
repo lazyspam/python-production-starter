@@ -11,3 +11,10 @@ wheels/
 
 # Local secrets
 .env
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# Alembic revisions are generated per project from the models, not shipped with the template.
+migrations/versions/*
+!migrations/versions/.gitkeep
