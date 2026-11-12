@@ -32,8 +32,8 @@ src/app/
   core/                   # Foundational features: auth, health, files, fcm_token, audit
   modules/                # Business features: one package per feature
   locals/                 # Message catalogs (JSON), exposed as `msg`
-migrations/               # Alembic revisions
-docker/entrypoint.sh      # Container entrypoint: migrate, then start uvicorn
+migrations/               # Alembic env and template; revisions are generated per project
+docker/entrypoint.sh      # Container entrypoint: start uvicorn
 tests/                    # pytest suite
 ```
 
@@ -107,11 +107,18 @@ Dependencies point one way: controllers call services, services call repositorie
    docker compose up -d postgres redis
    ```
 
-4. **Run migrations**
+4. **Generate and run migrations**
+
+   The template ships no migration files (`migrations/versions/` is git-ignored). Generate the first revision from
+   the models, then apply it:
 
    ```bash
+   uv run alembic revision --autogenerate -m "initial schema"
    uv run alembic upgrade head
    ```
+
+   Generated files are linted and formatted by ruff automatically. Review each one before applying: autogenerate
+   does not drop enum types on downgrade, and sees a renamed column as a drop plus an add.
 
 ### Running the application
 
@@ -134,7 +141,7 @@ docker compose down             # stop and keep data
 docker compose down -v          # stop and remove volumes
 ```
 
-The API container runs `alembic upgrade head` before it starts uvicorn. The worker container runs `python -m app.worker` and waits for the API healthcheck, so migrations have run first.
+A one-off `migrate` service runs `alembic upgrade head` and exits; the API and worker start only after it succeeds, so replicas never race on migrations. Outside compose, run migrations as a separate deploy step. The worker is healthy while its Redis heartbeat is fresh (`python -m app.worker --check`). Cookie-authenticated writes must send an `Origin` (or `Referer`) matching `FRONTEND_URL` or `BACKEND_URL`; bearer clients are exempt. Uploads live under `uploads/public/` or `uploads/private/`, so a bucket policy can expose public files only.
 
 ## Authentication (Cookies vs. Bearer Tokens)
 

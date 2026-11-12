@@ -1,4 +1,4 @@
-# Full local app stack: api + worker + Postgres + Redis.
+# Full local app stack: migrate (one-off) + api + worker + Postgres + Redis.
 #
 #   docker compose up --build -d   # build the image, start everything
 #   docker compose logs -f app     # tail API logs
@@ -57,7 +57,31 @@ services:
       start_period: 3s
     networks: [app-net]
 
-  # API. Runs `alembic upgrade head` before uvicorn (docker/entrypoint.sh).
+  # One-off: applies migrations once per `up`, then exits. API and worker start only after it succeeds,
+  # so several API replicas never race on `alembic upgrade head`.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: *app-image
+    container_name: python-production-migrate
+    restart: 'no'
+    entrypoint: ["alembic", "upgrade", "head"]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379
+    networks: [app-net]
+
+  # API (uvicorn, docker/entrypoint.sh).
   app:
     build:
       context: .
@@ -66,8 +90,8 @@ services:
     container_name: python-production-app
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     env_file:
@@ -86,7 +110,7 @@ services:
     networks: [app-net]
 
   # Background jobs (BullMQ consumers). Same image, different entrypoint, no HTTP port.
-  # Starts only after the API is healthy, which means migrations have already run.
+  # Healthy while its Redis heartbeat is fresh (the image's HTTP healthcheck doesn't apply to it).
   worker:
     build:
       context: .
@@ -95,12 +119,16 @@ services:
     container_name: python-production-worker
     restart: unless-stopped
     entrypoint: ["python", "-m", "app.worker"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--check"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
-        condition: service_healthy
-      app:
         condition: service_healthy
     env_file:
       - path: .env

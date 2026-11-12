@@ -60,13 +60,25 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Lint
         run: uv run ruff check
 
-      - name: Migrate database
-        run: uv run alembic upgrade head
+      - name: Format
+        run: uv run ruff format --check
+
+      - name: Type check
+        run: uv run ty check
+
+      # No revisions are committed: generate one from the models, then prove it applies cleanly and matches them.
+      - name: Generate and apply migrations
+        run: |
+          uv run alembic revision --autogenerate -m "initial schema"
+          uv run alembic upgrade head
+
+      - name: Check migrations match models
+        run: uv run alembic check
 
       - name: Test
         run: uv run pytest

@@ -15,7 +15,8 @@
 #   - UV_PYTHON_DOWNLOADS=never: uv uses the Python in the base image, never downloads one.
 #   - The app runs as uid 10001 and never as root.
 #   - HEALTHCHECK uses the Python standard library (no curl or wget) against /api/v1/health/liveness.
-#   - The same image runs the API (entrypoint) and the worker (docker-compose overrides entrypoint).
+#   - The same image runs the API (entrypoint), the worker and the one-off migrate job (compose overrides entrypoint).
+#   - The HTTP HEALTHCHECK is for the API; the worker overrides it with `python -m app.worker --check`.
 
 FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
 
