@@ -34,7 +34,6 @@ src/app/
   locals/                 # Message catalogs (JSON), exposed as `msg`
 migrations/               # Alembic env and template; revisions are generated per project
 docker/entrypoint.sh      # Container entrypoint: start uvicorn
-tests/                    # pytest suite
 ```
 
 Every feature in `core/` and `modules/` is split into strict layers:
@@ -200,16 +199,15 @@ async def send_welcome(email: str) -> None:
 
 Queues are `mail`, `sms`, `audit`, and `maintenance`. Each job retries 5 times with exponential backoff. Jobs are stored in Redis, so several API and worker instances can share one queue.
 
-## Testing
-
-Tests use pytest with pytest-asyncio in auto mode, and HTTP tests use httpx. They need Postgres and Redis running, so start them first with `docker compose up -d postgres redis`.
+## Checks
 
 ```bash
 uv run ruff check     # lint
-uv run pytest         # tests in tests/
+uv run ruff format    # format
+uv run ty check       # type check
 ```
 
-CI runs the same commands on every push and pull request, with service containers for Postgres 18 and Redis 8.
+CI runs the same checks on every push and pull request, and generates and applies migrations against service containers for Postgres 18 and Redis 8.
 
 ## Adding a Feature
 
@@ -219,7 +217,6 @@ CI runs the same commands on every push and pull request, with service container
 4. Put the router in `controllers/<area>.py`. It parses the request, calls one service, and returns an `Envelope`.
 5. Add the models to `src/app/database/models.py`, then include the router in `src/app/main.py` under the `/api/v1` prefix.
 6. Add an Alembic revision for any new table: `uv run alembic revision --autogenerate -m "<message>"`.
-7. Add tests under `tests/`.
 
 ## Contributing
 

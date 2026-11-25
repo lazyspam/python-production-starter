@@ -6,7 +6,6 @@ __pycache__
 build
 dist
 coverage
-.pytest_cache
 .ruff_cache
 .ty_cache
 
@@ -26,8 +25,7 @@ coverage
 .idea
 .DS_Store
 
-# Tests and docs are not needed to run the app.
-tests
+# Docs are not needed to run the app.
 README.md
 AGENTS.md
 CLAUDE.md
